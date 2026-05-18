@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: smart-rate-limiter-api
+    runtime: docker
+    plan: starter
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        sync: false
+      - key: SPRING_DATASOURCE_PASSWORD
+        sync: false
+      - key: SPRING_JPA_HIBERNATE_DDL_AUTO
+        value: update
+      - key: SPRING_DATA_REDIS_HOST
+        sync: false
+      - key: SPRING_DATA_REDIS_PORT
+        sync: false
+      - key: SPRING_DATA_REDIS_USERNAME
+        sync: false
+      - key: SPRING_DATA_REDIS_PASSWORD
+        sync: false
+      - key: SPRING_DATA_REDIS_SSL_ENABLED
+        value: "true"
+      - key: MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS
+        value: never
+
+  - type: worker
+    name: smart-rate-limiter-ml
+    runtime: docker
+    plan: starter
+    dockerContext: ./ml-service
+    dockerfilePath: ./ml-service/Dockerfile
+    envVars:
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_SSL_MODE
+        value: REQUIRED
+      - key: DETECTION_INTERVAL_SECONDS
+        value: "60"
