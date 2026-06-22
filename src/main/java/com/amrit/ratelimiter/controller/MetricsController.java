@@ -1,12 +1,13 @@
 package com.amrit.ratelimiter.controller;
 
+import com.amrit.ratelimiter.model.TrafficEvent;
 import com.amrit.ratelimiter.repository.AnomalyResultRepository;
 import com.amrit.ratelimiter.repository.TrafficEventRepository;
 import com.amrit.ratelimiter.service.RateLimiterService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
-import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,20 +16,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * REST API for monitoring and administration.
- *
- * Endpoints:
- * GET  /api/metrics/summary        - overall stats (requests, blocks, anomalies)
- * GET  /api/metrics/top-ips        - top IPs by request volume
- * GET  /api/metrics/anomalies      - recent anomaly detections
- * POST /api/admin/block/{ip}       - manually block an IP
- * DELETE /api/admin/unblock/{ip}   - manually unblock an IP
- * GET  /api/health/rate-limit/{ip} - check current count for an IP
- */
 @RestController
 @RequiredArgsConstructor
-@Tag(name = "Smart Rate Limiter API", description = "Metrics and admin endpoints")
+@Tag(name = "Smart Rate Limiter API", description = "Demo, metrics, and admin endpoints")
 public class MetricsController {
 
     private final TrafficEventRepository trafficEventRepository;
@@ -44,15 +34,18 @@ public class MetricsController {
         long totalRequests = trafficEventRepository.count();
         long blockedLastHour = trafficEventRepository
             .countByStatusCodeAndTimestampAfter(429, lastHour);
-        long totalLastDay = trafficEventRepository
+        long allowedLastDay = trafficEventRepository
             .countByStatusCodeAndTimestampAfter(200, lastDay);
         long anomaliesDetected = anomalyResultRepository.count();
 
         Map<String, Object> summary = new HashMap<>();
         summary.put("totalRequestsAllTime", totalRequests);
         summary.put("blockedRequestsLastHour", blockedLastHour);
-        summary.put("allowedRequestsLastDay", totalLastDay);
+        summary.put("allowedRequestsLastDay", allowedLastDay);
         summary.put("totalAnomaliesDetected", anomaliesDetected);
+        summary.put("limit", rateLimiterService.getMaxRequests());
+        summary.put("windowSeconds", rateLimiterService.getWindowSeconds());
+        summary.put("blockTtlSeconds", rateLimiterService.getBlockTtlSeconds());
         summary.put("timestamp", LocalDateTime.now());
 
         return ResponseEntity.ok(summary);
@@ -79,6 +72,12 @@ public class MetricsController {
             .toList();
 
         return ResponseEntity.ok(topIps);
+    }
+
+    @GetMapping("/api/metrics/recent")
+    @Operation(summary = "Recent traffic events for demo dashboards")
+    public ResponseEntity<List<TrafficEvent>> getRecentTraffic() {
+        return ResponseEntity.ok(trafficEventRepository.findTop12ByOrderByTimestampDesc());
     }
 
     @GetMapping("/api/metrics/anomalies")
@@ -118,17 +117,68 @@ public class MetricsController {
         return ResponseEntity.ok(Map.of(
             "ip", ip,
             "currentWindowCount", count,
+            "limit", rateLimiterService.getMaxRequests(),
+            "remainingRequests", Math.max(rateLimiterService.getMaxRequests() - count, 0),
             "isAnomalous", anomalyResultRepository.existsByClientIpAndIsAnomalousTrue(ip)
         ));
     }
 
-    // Demo endpoint to test rate limiting
-    @GetMapping("/api/hello")
-    @Operation(summary = "Demo endpoint — try hitting this to trigger rate limiting")
-    public ResponseEntity<Map<String, String>> hello() {
+    @GetMapping("/api/demo/client-ip")
+    @Operation(summary = "Return the requester's detected IP address")
+    public ResponseEntity<Map<String, Object>> getClientIp(HttpServletRequest request) {
+        String clientIp = extractClientIp(request);
+        int count = rateLimiterService.getCurrentCount(clientIp);
         return ResponseEntity.ok(Map.of(
-            "message", "Hello! This endpoint is rate limited.",
+            "clientIp", clientIp,
+            "currentWindowCount", count,
+            "limit", rateLimiterService.getMaxRequests(),
+            "remainingRequests", Math.max(rateLimiterService.getMaxRequests() - count, 0),
             "timestamp", LocalDateTime.now().toString()
         ));
+    }
+
+    @GetMapping("/api/demo/config")
+    @Operation(summary = "Return demo rate-limit settings")
+    public ResponseEntity<Map<String, Object>> getDemoConfig() {
+        return ResponseEntity.ok(Map.of(
+            "limit", rateLimiterService.getMaxRequests(),
+            "windowSeconds", rateLimiterService.getWindowSeconds(),
+            "blockTtlSeconds", rateLimiterService.getBlockTtlSeconds(),
+            "protectedEndpoints", List.of("/api/test", "/api/hello")
+        ));
+    }
+
+    @GetMapping("/api/test")
+    @Operation(summary = "Protected demo endpoint - hit repeatedly to trigger 429")
+    public ResponseEntity<Map<String, Object>> test(HttpServletRequest request) {
+        return ResponseEntity.ok(Map.of(
+            "message", "Request allowed",
+            "endpoint", "/api/test",
+            "clientIp", extractClientIp(request),
+            "timestamp", LocalDateTime.now().toString()
+        ));
+    }
+
+    @GetMapping("/api/hello")
+    @Operation(summary = "Protected demo endpoint - try hitting this to trigger rate limiting")
+    public ResponseEntity<Map<String, Object>> hello(HttpServletRequest request) {
+        return ResponseEntity.ok(Map.of(
+            "message", "Hello! This endpoint is rate limited.",
+            "endpoint", "/api/hello",
+            "clientIp", extractClientIp(request),
+            "timestamp", LocalDateTime.now().toString()
+        ));
+    }
+
+    private String extractClientIp(HttpServletRequest request) {
+        String xForwardedFor = request.getHeader("X-Forwarded-For");
+        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
+            return xForwardedFor.split(",")[0].trim();
+        }
+        String xRealIp = request.getHeader("X-Real-IP");
+        if (xRealIp != null && !xRealIp.isBlank()) {
+            return xRealIp.trim();
+        }
+        return request.getRemoteAddr();
     }
 }

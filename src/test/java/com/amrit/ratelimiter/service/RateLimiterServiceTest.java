@@ -9,11 +9,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+
+import java.util.List;
 
 /**
  * Unit tests for RateLimiterService.
@@ -34,11 +37,14 @@ class RateLimiterServiceTest {
     @Mock
     private ValueOperations<String, String> valueOps;
 
+    @Mock
+    private DefaultRedisScript<String> slidingWindowRateLimitScript;
+
     private RateLimiterService rateLimiterService;
 
     @BeforeEach
     void setUp() {
-        rateLimiterService = new RateLimiterService(rateLimitTemplate, blocklistTemplate);
+        rateLimiterService = new RateLimiterService(rateLimitTemplate, blocklistTemplate, slidingWindowRateLimitScript);
 
         ReflectionTestUtils.setField(rateLimiterService, "maxRequests", 100);
         ReflectionTestUtils.setField(rateLimiterService, "windowSeconds", 60);
@@ -49,12 +55,10 @@ class RateLimiterServiceTest {
     @DisplayName("Should allow request when under rate limit")
     void shouldAllowRequestUnderLimit() {
         String ip = "192.168.1.1";
-        when(rateLimitTemplate.opsForZSet()).thenReturn(zSetOps);
         when(blocklistTemplate.opsForValue()).thenReturn(valueOps);
         when(valueOps.get("block:" + ip)).thenReturn(null);
-        when(zSetOps.removeRangeByScore(anyString(), anyDouble(), anyDouble())).thenReturn(0L);
-        when(zSetOps.zCard(anyString())).thenReturn(5L);
-        when(zSetOps.add(anyString(), anyString(), anyDouble())).thenReturn(true);
+        when(rateLimitTemplate.execute(eq(slidingWindowRateLimitScript), eq(List.of("rl:" + ip)),
+            any(), any(), any(), any(), any(), any())).thenReturn("1:6:0");
 
         RateLimiterService.RateLimitResult result = rateLimiterService.checkRateLimit(ip);
 
@@ -67,18 +71,17 @@ class RateLimiterServiceTest {
     @DisplayName("Should block request when rate limit exceeded")
     void shouldBlockRequestWhenLimitExceeded() {
         String ip = "192.168.1.2";
-        when(rateLimitTemplate.opsForZSet()).thenReturn(zSetOps);
         when(blocklistTemplate.opsForValue()).thenReturn(valueOps);
         when(valueOps.get("block:" + ip)).thenReturn(null);
-        when(zSetOps.removeRangeByScore(anyString(), anyDouble(), anyDouble())).thenReturn(0L);
-        when(zSetOps.zCard(anyString())).thenReturn(100L);
+        when(rateLimitTemplate.execute(eq(slidingWindowRateLimitScript), eq(List.of("rl:" + ip)),
+            any(), any(), any(), any(), any(), any())).thenReturn("0:100:47");
 
         RateLimiterService.RateLimitResult result = rateLimiterService.checkRateLimit(ip);
 
         assertThat(result.allowed()).isFalse();
         assertThat(result.type()).isEqualTo(RateLimiterService.RateLimitResult.ResultType.RATE_LIMITED);
         assertThat(result.reason()).contains("Rate limit exceeded");
-        verify(zSetOps, never()).add(anyString(), anyString(), anyDouble());
+        assertThat(result.retryAfterSeconds()).isEqualTo(47);
     }
 
     @Test

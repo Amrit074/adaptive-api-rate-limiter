@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adaptive API Rate Limiter</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --ink: #102033;
+      --muted: #5b6b82;
+      --line: #d8e0ea;
+      --blue: #1f6feb;
+      --green: #0f8a5f;
+      --red: #c7352c;
+      --amber: #9a6700;
+      --shadow: 0 18px 45px rgba(16, 32, 51, 0.10);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 34px 0 48px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: flex-start;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(30px, 5vw, 50px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      max-width: 760px;
+    }
+
+    .status-pill {
+      min-width: 150px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-weight: 700;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1.3fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel-head {
+      padding: 18px 20px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .panel-body {
+      padding: 18px 20px 20px;
+    }
+
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .fact {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfcfe;
+    }
+
+    .label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .value {
+      font-size: 22px;
+      font-weight: 800;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: var(--blue);
+      color: white;
+      padding: 11px 14px;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: white;
+      border-color: var(--line);
+      color: var(--ink);
+    }
+
+    button.danger {
+      background: var(--red);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .progress {
+      height: 12px;
+      border-radius: 999px;
+      background: #e9eef5;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      margin: 8px 0 16px;
+    }
+
+    .progress > div {
+      height: 100%;
+      width: 0%;
+      background: var(--green);
+      transition: width 160ms ease, background 160ms ease;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #101828;
+      color: #e6edf7;
+      border-radius: 8px;
+      padding: 14px;
+      min-height: 178px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      padding: 10px 8px;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    .ok { color: var(--green); font-weight: 800; }
+    .blocked { color: var(--red); font-weight: 800; }
+    .warn { color: var(--amber); font-weight: 800; }
+
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .steps {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    code {
+      background: #edf2f7;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 5px;
+      color: #26364a;
+    }
+
+    @media (max-width: 860px) {
+      header, .grid { grid-template-columns: 1fr; display: grid; }
+      .facts { grid-template-columns: 1fr; }
+      .status-pill { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>Adaptive API Rate Limiter</h1>
+        <p class="sub">Spring Boot gateway with Redis sliding-window throttling, JSON 429 responses, MySQL traffic logs, and ML-backed Redis TTL blocklisting.</p>
+      </div>
+      <div id="status" class="status-pill">Checking API</div>
+    </header>
+
+    <section class="grid">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Live Demo</h2>
+          </div>
+          <div class="panel-body">
+            <div class="facts">
+              <div class="fact">
+                <span class="label">Your IP</span>
+                <span id="clientIp" class="value">-</span>
+              </div>
+              <div class="fact">
+                <span class="label">Limit</span>
+                <span id="limit" class="value">-</span>
+              </div>
+              <div class="fact">
+                <span class="label">Remaining</span>
+                <span id="remaining" class="value">-</span>
+              </div>
+            </div>
+
+            <span class="label">Current window usage</span>
+            <div class="progress"><div id="bar"></div></div>
+
+            <div class="actions">
+              <button id="hitBtn">Send 1 request</button>
+              <button id="burstBtn" class="danger">Send burst</button>
+              <button id="refreshBtn" class="secondary">Refresh stats</button>
+            </div>
+
+            <pre id="result">Click "Send burst" to trigger the Redis sliding-window limiter and see a 429 response.</pre>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>How to Demo It</h2>
+          </div>
+          <div class="panel-body">
+            <ol class="steps">
+              <li>Click <code>Send burst</code> to hit <code>/api/test</code> repeatedly.</li>
+              <li>Watch <code>X-RateLimit-Remaining</code> fall to zero.</li>
+              <li>Show the JSON <code>429 Too Many Requests</code> response.</li>
+              <li>Open metrics to prove traffic was logged to MySQL.</li>
+            </ol>
+          </div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Metrics</h2>
+          </div>
+          <div class="panel-body">
+            <div class="facts">
+              <div class="fact">
+                <span class="label">All requests</span>
+                <span id="totalRequests" class="value">-</span>
+              </div>
+              <div class="fact">
+                <span class="label">Blocked last hour</span>
+                <span id="blockedLastHour" class="value">-</span>
+              </div>
+              <div class="fact">
+                <span class="label">Anomalies</span>
+                <span id="anomalies" class="value">-</span>
+              </div>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>IP</th>
+                  <th>Endpoint</th>
+                  <th>Status</th>
+                  <th>Latency</th>
+                </tr>
+              </thead>
+              <tbody id="recentRows">
+                <tr><td colspan="5">No traffic loaded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>API Proof</h2>
+          </div>
+          <div class="panel-body">
+            <pre>PowerShell:
+1..10 | ForEach-Object { curl.exe -i http://localhost:8080/api/test; echo "" }
+
+Redis:
+redis-cli ZRANGE rl:&lt;ip&gt; 0 -1 WITHSCORES
+
+MySQL:
+SELECT client_ip, endpoint, status_code, latency_ms, request_count, timestamp
+FROM traffic_log ORDER BY timestamp DESC LIMIT 10;</pre>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = { limit: 5, clientIp: "", remaining: 5 };
+    const els = {
+      status: document.getElementById("status"),
+      clientIp: document.getElementById("clientIp"),
+      limit: document.getElementById("limit"),
+      remaining: document.getElementById("remaining"),
+      bar: document.getElementById("bar"),
+      result: document.getElementById("result"),
+      hitBtn: document.getElementById("hitBtn"),
+      burstBtn: document.getElementById("burstBtn"),
+      refreshBtn: document.getElementById("refreshBtn"),
+      totalRequests: document.getElementById("totalRequests"),
+      blockedLastHour: document.getElementById("blockedLastHour"),
+      anomalies: document.getElementById("anomalies"),
+      recentRows: document.getElementById("recentRows")
+    };
+
+    function setStatus(text, className) {
+      els.status.textContent = text;
+      els.status.className = "status-pill " + (className || "");
+    }
+
+    function renderWindow(current, limit, remaining) {
+      const used = Math.min(Math.max(current, 0), limit);
+      const pct = limit ? (used / limit) * 100 : 0;
+      els.limit.textContent = limit + "/window";
+      els.remaining.textContent = remaining;
+      els.bar.style.width = pct + "%";
+      els.bar.style.background = remaining <= 0 ? "var(--red)" : remaining <= 2 ? "var(--amber)" : "var(--green)";
+    }
+
+    async function asJson(response) {
+      const text = await response.text();
+      try {
+        return text ? JSON.parse(text) : {};
+      } catch {
+        return { raw: text };
+      }
+    }
+
+    function headersFrom(response) {
+      return {
+        status: response.status,
+        limit: response.headers.get("X-RateLimit-Limit"),
+        remaining: response.headers.get("X-RateLimit-Remaining"),
+        reset: response.headers.get("X-RateLimit-Reset"),
+        retryAfter: response.headers.get("Retry-After"),
+        type: response.headers.get("X-RateLimit-Type")
+      };
+    }
+
+    async function loadBasics() {
+      try {
+        const [configRes, ipRes] = await Promise.all([
+          fetch("/api/demo/config"),
+          fetch("/api/demo/client-ip")
+        ]);
+        const config = await configRes.json();
+        const ip = await ipRes.json();
+        state.limit = config.limit || 5;
+        state.clientIp = ip.clientIp || "-";
+        state.remaining = ip.remainingRequests ?? state.limit;
+        els.clientIp.textContent = state.clientIp;
+        renderWindow(ip.currentWindowCount || 0, state.limit, state.remaining);
+        setStatus("API online", "ok");
+      } catch (error) {
+        setStatus("API offline", "blocked");
+        els.result.textContent = "Could not reach API: " + error.message;
+      }
+    }
+
+    async function loadMetrics() {
+      try {
+        const [summaryRes, recentRes] = await Promise.all([
+          fetch("/api/metrics/summary"),
+          fetch("/api/metrics/recent")
+        ]);
+        const summary = await summaryRes.json();
+        const recent = await recentRes.json();
+        els.totalRequests.textContent = summary.totalRequestsAllTime ?? 0;
+        els.blockedLastHour.textContent = summary.blockedRequestsLastHour ?? 0;
+        els.anomalies.textContent = summary.totalAnomaliesDetected ?? 0;
+        els.recentRows.innerHTML = recent.length ? recent.map(row => `
+          <tr>
+            <td>${new Date(row.timestamp).toLocaleTimeString()}</td>
+            <td>${row.clientIp}</td>
+            <td>${row.endpoint}</td>
+            <td class="${row.statusCode === 429 ? "blocked" : "ok"}">${row.statusCode}</td>
+            <td>${row.latencyMs} ms</td>
+          </tr>
+        `).join("") : `<tr><td colspan="5">No traffic recorded yet.</td></tr>`;
+      } catch (error) {
+        els.recentRows.innerHTML = `<tr><td colspan="5">Metrics unavailable: ${error.message}</td></tr>`;
+      }
+    }
+
+    async function hitOnce() {
+      const response = await fetch("/api/test");
+      const body = await asJson(response);
+      const headers = headersFrom(response);
+      const limit = Number(headers.limit || state.limit);
+      const remaining = Number(headers.remaining ?? state.remaining);
+      const current = limit - remaining;
+      state.limit = limit;
+      state.remaining = remaining;
+      renderWindow(current, limit, remaining);
+      els.result.textContent = JSON.stringify({ headers, body }, null, 2);
+      await loadMetrics();
+      return response.status;
+    }
+
+    async function withBusy(button, work) {
+      button.disabled = true;
+      try {
+        await work();
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    els.hitBtn.addEventListener("click", () => withBusy(els.hitBtn, hitOnce));
+    els.burstBtn.addEventListener("click", () => withBusy(els.burstBtn, async () => {
+      const statuses = [];
+      for (let i = 0; i < state.limit + 3; i += 1) {
+        statuses.push(await hitOnce());
+        await new Promise(resolve => setTimeout(resolve, 120));
+      }
+      els.result.textContent += "\n\nBurst statuses: " + statuses.join(", ");
+    }));
+    els.refreshBtn.addEventListener("click", () => withBusy(els.refreshBtn, async () => {
+      await loadBasics();
+      await loadMetrics();
+    }));
+
+    loadBasics().then(loadMetrics);
+  </script>
+</body>
+</html>

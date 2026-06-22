@@ -5,28 +5,16 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.UUID;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Core sliding window rate limiter backed by Redis.
- *
- * Algorithm:
- * - Each IP gets a Redis Sorted Set: key = "rl:{ip}"
- * - Each request is stored as a member = timestamp (millis), score = timestamp
- * - On each request:
- *   1. Remove all members older than (now - windowMs) → trim the window
- *   2. Count remaining members → current request count
- *   3. If count < maxRequests: add current timestamp, allow request
- *   4. If count >= maxRequests: reject with 429
- * - The Sorted Set TTL is refreshed to windowSeconds on every hit
- *
- * Why Sorted Set vs simple counter:
- * - Simple counter loses precision at window boundaries (fixed window problem)
- * - Sorted Set gives exact sliding window: always counts exactly the last N seconds
- * - Tradeoff: slightly more memory per IP (each request = one entry in the set)
+ * Core sliding-window rate limiter backed by Redis Sorted Sets.
  */
 @Service
 @Slf4j
@@ -39,7 +27,10 @@ public class RateLimiterService {
     @Qualifier("blocklistTemplate")
     private final RedisTemplate<String, String> blocklistTemplate;
 
-    @Value("${rate-limiter.max-requests:100}")
+    @Qualifier("slidingWindowRateLimitScript")
+    private final DefaultRedisScript<String> slidingWindowRateLimitScript;
+
+    @Value("${rate-limiter.max-requests:5}")
     private int maxRequests;
 
     @Value("${rate-limiter.window-seconds:60}")
@@ -51,101 +42,136 @@ public class RateLimiterService {
     private static final String RATE_LIMIT_KEY_PREFIX = "rl:";
     private static final String BLOCK_KEY_PREFIX = "block:";
 
-    /**
-     * Core rate limit check.
-     * Returns RateLimitResult containing: allowed/blocked, current count, and reason.
-     */
     public RateLimitResult checkRateLimit(String clientIp) {
-        // 1. Check anomaly blocklist first (fastest path — O(1) Redis GET)
-        String blockReason = isBlocked(clientIp);
-        if (blockReason != null) {
-            log.debug("IP {} blocked by anomaly blocklist: {}", clientIp, blockReason);
-            return RateLimitResult.blocked(0, "ANOMALY_BLOCK: " + blockReason);
+        try {
+            String blockReason = isBlocked(clientIp);
+            if (blockReason != null) {
+                log.debug("IP {} blocked by anomaly blocklist: {}", clientIp, blockReason);
+                return RateLimitResult.blocked(0, maxRequests, windowSeconds,
+                    "ANOMALY_BLOCK: " + blockReason);
+            }
+
+            String key = RATE_LIMIT_KEY_PREFIX + clientIp;
+            long nowMs = Instant.now().toEpochMilli();
+            long windowMs = windowSeconds * 1000L;
+            long windowStart = nowMs - windowMs;
+
+            String scriptResult = redisTemplate.execute(
+                slidingWindowRateLimitScript,
+                List.of(key),
+                String.valueOf(nowMs),
+                String.valueOf(windowStart),
+                String.valueOf(maxRequests),
+                String.valueOf(windowSeconds * 2L),
+                nowMs + ":" + UUID.randomUUID(),
+                String.valueOf(windowMs)
+            );
+            ScriptResult decision = ScriptResult.parse(scriptResult);
+
+            if (!decision.allowed()) {
+                int count = decision.requestCount();
+                log.debug("IP {} rate limited: {}/{} requests in window", clientIp, count, maxRequests);
+                return RateLimitResult.rateLimited(count, maxRequests, decision.retryAfterSeconds(),
+                    "Rate limit exceeded: " + count + "/" + maxRequests + " requests in " + windowSeconds + "s");
+            }
+
+            return RateLimitResult.allowed(decision.requestCount(), maxRequests, windowSeconds);
+        } catch (Exception e) {
+            log.warn("Redis rate-limit check failed for IP {}. Failing open: {}", clientIp, e.getMessage());
+            return RateLimitResult.failOpen(maxRequests, windowSeconds,
+                "Redis unavailable; request allowed to preserve API availability");
         }
-
-        // 2. Sliding window check
-        String key = RATE_LIMIT_KEY_PREFIX + clientIp;
-        long nowMs = Instant.now().toEpochMilli();
-        long windowMs = windowSeconds * 1000L;
-        long windowStart = nowMs - windowMs;
-
-        // Remove expired entries outside the current window
-        redisTemplate.opsForZSet().removeRangeByScore(key, 0, windowStart);
-
-        // Count requests in current window
-        Long currentCount = redisTemplate.opsForZSet().zCard(key);
-        int count = (currentCount == null) ? 0 : currentCount.intValue();
-
-        if (count >= maxRequests) {
-            log.debug("IP {} rate limited: {}/{} requests in window", clientIp, count, maxRequests);
-            return RateLimitResult.rateLimited(count,
-                "Rate limit exceeded: " + count + "/" + maxRequests + " requests in " + windowSeconds + "s");
-        }
-
-        // Allow: add this request timestamp to the sorted set
-        String member = String.valueOf(nowMs);
-        redisTemplate.opsForZSet().add(key, member, nowMs);
-        // Refresh TTL so the key expires naturally when idle
-        redisTemplate.expire(key, windowSeconds * 2L, TimeUnit.SECONDS);
-
-        return RateLimitResult.allowed(count + 1);
     }
 
-    /**
-     * Returns the current request count for an IP without modifying state.
-     * Used by the metrics endpoint.
-     */
     public int getCurrentCount(String clientIp) {
-        String key = RATE_LIMIT_KEY_PREFIX + clientIp;
-        long windowStart = Instant.now().toEpochMilli() - (windowSeconds * 1000L);
-        redisTemplate.opsForZSet().removeRangeByScore(key, 0, windowStart);
-        Long count = redisTemplate.opsForZSet().zCard(key);
-        return count == null ? 0 : count.intValue();
+        try {
+            String key = RATE_LIMIT_KEY_PREFIX + clientIp;
+            long windowStart = Instant.now().toEpochMilli() - (windowSeconds * 1000L);
+            redisTemplate.opsForZSet().removeRangeByScore(key, 0, windowStart);
+            Long count = redisTemplate.opsForZSet().zCard(key);
+            return count == null ? 0 : count.intValue();
+        } catch (Exception e) {
+            log.warn("Unable to read current rate-limit count for IP {}: {}", clientIp, e.getMessage());
+            return 0;
+        }
     }
 
-    /**
-     * Adds an IP to the Redis blocklist with a TTL.
-     * Called by AnomalySyncService after ML detection.
-     */
     public void blockIp(String ip, String reason) {
         String key = BLOCK_KEY_PREFIX + ip;
         blocklistTemplate.opsForValue().set(key, reason, blockTtlSeconds, TimeUnit.SECONDS);
         log.info("IP {} added to blocklist for {}s. Reason: {}", ip, blockTtlSeconds, reason);
     }
 
-    /**
-     * Manually unblock an IP (admin endpoint use).
-     */
     public void unblockIp(String ip) {
         blocklistTemplate.delete(BLOCK_KEY_PREFIX + ip);
         log.info("IP {} removed from blocklist", ip);
     }
 
-    /**
-     * Returns block reason if IP is blocked, null if not blocked.
-     */
+    public int getMaxRequests() {
+        return maxRequests;
+    }
+
+    public int getWindowSeconds() {
+        return windowSeconds;
+    }
+
+    public int getBlockTtlSeconds() {
+        return blockTtlSeconds;
+    }
+
     private String isBlocked(String ip) {
         return blocklistTemplate.opsForValue().get(BLOCK_KEY_PREFIX + ip);
     }
 
-    // ── Inner result class ────────────────────────────────────────────────
-
     public record RateLimitResult(
         boolean allowed,
         int requestCount,
+        int limit,
+        int remainingRequests,
+        int retryAfterSeconds,
+        int resetSeconds,
         String reason,
         ResultType type
     ) {
-        public enum ResultType { ALLOWED, RATE_LIMITED, ANOMALY_BLOCKED }
+        public enum ResultType { ALLOWED, RATE_LIMITED, ANOMALY_BLOCKED, FAIL_OPEN }
 
-        static RateLimitResult allowed(int count) {
-            return new RateLimitResult(true, count, "OK", ResultType.ALLOWED);
+        static RateLimitResult allowed(int count, int limit, int windowSeconds) {
+            return new RateLimitResult(true, count, limit, Math.max(limit - count, 0),
+                0, windowSeconds, "OK", ResultType.ALLOWED);
         }
-        static RateLimitResult rateLimited(int count, String reason) {
-            return new RateLimitResult(false, count, reason, ResultType.RATE_LIMITED);
+
+        static RateLimitResult rateLimited(int count, int limit, int retryAfterSeconds, String reason) {
+            return new RateLimitResult(false, count, limit, 0,
+                retryAfterSeconds, retryAfterSeconds, reason, ResultType.RATE_LIMITED);
         }
-        static RateLimitResult blocked(int count, String reason) {
-            return new RateLimitResult(false, count, reason, ResultType.ANOMALY_BLOCKED);
+
+        static RateLimitResult blocked(int count, int limit, int windowSeconds, String reason) {
+            return new RateLimitResult(false, count, limit, 0,
+                windowSeconds, windowSeconds, reason, ResultType.ANOMALY_BLOCKED);
+        }
+
+        static RateLimitResult failOpen(int limit, int windowSeconds, String reason) {
+            return new RateLimitResult(true, 0, limit, limit,
+                0, windowSeconds, reason, ResultType.FAIL_OPEN);
+        }
+    }
+
+    private record ScriptResult(boolean allowed, int requestCount, int retryAfterSeconds) {
+        private static ScriptResult parse(String value) {
+            if (value == null) {
+                throw new IllegalStateException("Rate-limit Lua script returned no result");
+            }
+
+            String[] parts = value.split(":", -1);
+            if (parts.length != 3) {
+                throw new IllegalStateException("Unexpected rate-limit Lua script result: " + value);
+            }
+
+            return new ScriptResult(
+                "1".equals(parts[0]),
+                Integer.parseInt(parts[1]),
+                Integer.parseInt(parts[2])
+            );
         }
     }
 }

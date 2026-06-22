@@ -21,4 +21,6 @@ public interface TrafficEventRepository extends JpaRepository<TrafficEvent, Long
 
     // Used to feed the ML service (recent window only)
     List<TrafficEvent> findByTimestampAfterOrderByTimestampDesc(LocalDateTime since);
+
+    List<TrafficEvent> findTop12ByOrderByTimestampDesc();
 }

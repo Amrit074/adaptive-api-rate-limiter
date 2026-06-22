@@ -34,7 +34,7 @@ spring:
 # Rate Limiter Configuration
 rate-limiter:
   # Max requests per window per IP
-  max-requests: ${RATE_LIMITER_MAX_REQUESTS:100}
+  max-requests: ${RATE_LIMITER_MAX_REQUESTS:5}
   # Window size in seconds
   window-seconds: ${RATE_LIMITER_WINDOW_SECONDS:60}
   # Blocklist TTL in seconds (how long an anomalous IP stays blocked)
