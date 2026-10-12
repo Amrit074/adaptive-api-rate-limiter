@@ -23,10 +23,10 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Exercises the actual Lua script against Redis. It is skipped automatically
- * where Docker is unavailable, while normal unit tests remain Docker-free.
+ * Exercises the actual Lua script against Redis. Docker is required so that
+ * CI cannot silently pass without running the concurrency proof.
  */
-@Testcontainers(disabledWithoutDocker = true)
+@Testcontainers
 class RateLimiterRedisConcurrencyTest {
 
     private static final int LIMIT = 10;

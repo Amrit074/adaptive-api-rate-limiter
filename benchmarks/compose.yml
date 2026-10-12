@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: disposable-benchmark-only
+      MYSQL_DATABASE: rate_limiter_db
+    tmpfs: [/var/lib/mysql]
+    healthcheck:
+      test: [CMD, mysqladmin, ping, -h, localhost, -pdisposable-benchmark-only]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  app:
+    image: eclipse-temurin:17-jre
+    command: [java, -jar, /app/app.jar]
+    volumes:
+      - ../target/smart-rate-limiter-1.0.0.jar:/app/app.jar:ro
+    ports: ['127.0.0.1:18080:8080']
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/rate_limiter_db?allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: disposable-benchmark-only
+      SPRING_DATA_REDIS_HOST: redis
+      RATE_LIMITER_MAX_REQUESTS: ${BENCH_LIMIT:-100}
+      RATE_LIMITER_WINDOW_SECONDS: 60
+      RATE_LIMITER_ADMIN_KEY: ${RATE_LIMITER_ADMIN_KEY:-}
+    depends_on:
+      redis: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+  k6:
+    image: grafana/k6:0.54.0
+    profiles: [load]
+    working_dir: /results
+    volumes:
+      - ./rate-limiter.js:/scripts/rate-limiter.js:ro
+      - ./results:/results
+    environment:
+      BASE_URL: http://app:8080
+      VUS: ${VUS:-10}
+      DURATION: ${DURATION:-30s}
+      RESULT_FILE: ${RESULT_FILE:-rate-limiter-results.json}
+    command: [run, /scripts/rate-limiter.js]

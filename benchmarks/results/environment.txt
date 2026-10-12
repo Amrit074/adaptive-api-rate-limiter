@@ -1,0 +1,9 @@
+timestamp=2026-10-11T13:23:51.772731500Z
+java=21.0.1
+os=Windows 11
+processors=16
+redis=redis:7-alpine
+warmup=1000 calls
+limit=100 per 60s
+workers=10
+scope=service calls, Redis container over localhost; excludes HTTP, MySQL logging, ML and metrics

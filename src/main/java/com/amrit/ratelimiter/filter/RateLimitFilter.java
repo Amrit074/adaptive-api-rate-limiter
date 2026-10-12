@@ -2,6 +2,9 @@ package com.amrit.ratelimiter.filter;
 
 import com.amrit.ratelimiter.service.RateLimiterService;
 import com.amrit.ratelimiter.service.TrafficLoggingService;
+import com.amrit.ratelimiter.service.ClientPolicyService;
+import com.amrit.ratelimiter.service.PolicyLimiter;
+import org.springframework.web.server.ResponseStatusException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -17,6 +20,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.Map;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Central request interceptor for protected demo/API endpoints.
@@ -29,6 +34,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private final RateLimiterService rateLimiterService;
     private final TrafficLoggingService trafficLoggingService;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
+    private final ClientPolicyService clientPolicyService;
+    private final PolicyLimiter policyLimiter;
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
@@ -56,7 +64,34 @@ public class RateLimitFilter extends OncePerRequestFilter {
         String endpoint = request.getRequestURI();
         long startTime = System.currentTimeMillis();
 
-        RateLimiterService.RateLimitResult result = rateLimiterService.checkRateLimit(clientIp);
+        long decisionStart = System.nanoTime();
+        RateLimiterService.RateLimitResult result;
+        String apiKey = request.getHeader("X-API-Key");
+        if(apiKey != null && !apiKey.isBlank()) {
+            try {
+                var client = clientPolicyService.authenticate(apiKey);
+                response.setHeader("X-RateLimit-Policy", client.getName());
+                result = policyLimiter.check(client, clientIp);
+            } catch(ResponseStatusException e) {
+                response.setStatus(e.getStatusCode().value());
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                response.getWriter().write("{\"message\":\"Invalid or disabled API key\"}"); return;
+            } catch(Exception e) {
+                response.setStatus(503); response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                response.getWriter().write("{\"message\":\"Client authentication temporarily unavailable\"}"); return;
+            }
+        } else {
+            response.setHeader("X-RateLimit-Policy", "Anonymous IP");
+            result = rateLimiterService.checkRateLimit(clientIp);
+        }
+        // Fixed outcome labels only: never put IP addresses or arbitrary paths in metrics.
+        String outcome = result.type().name();
+        meterRegistry.counter("rate_limiter.decisions", "outcome", outcome).increment();
+        meterRegistry.timer("rate_limiter.decision", "outcome", outcome)
+            .record(System.nanoTime() - decisionStart, TimeUnit.NANOSECONDS);
+        if (result.type() == RateLimiterService.RateLimitResult.ResultType.FAIL_OPEN) {
+            meterRegistry.counter("rate_limiter.redis_errors").increment();
+        }
         addRateLimitHeaders(response, result);
 
         if (result.allowed()) {
@@ -77,8 +112,8 @@ public class RateLimitFilter extends OncePerRequestFilter {
         response.setHeader("X-RateLimit-Limit", String.valueOf(result.limit()));
         response.setHeader("X-RateLimit-Remaining", String.valueOf(result.remainingRequests()));
         response.setHeader("X-RateLimit-Reset", String.valueOf(result.resetSeconds()));
-        response.setHeader("X-RateLimit-Window", rateLimiterService.getWindowSeconds() + "s");
         response.setHeader("X-RateLimit-Type", result.type().name());
+        response.setHeader("X-RateLimit-Reason", result.reason());
         if (!result.allowed()) {
             response.setHeader("Retry-After", String.valueOf(result.retryAfterSeconds()));
         }
@@ -104,14 +139,6 @@ public class RateLimitFilter extends OncePerRequestFilter {
     }
 
     private String extractClientIp(HttpServletRequest request) {
-        String xForwardedFor = request.getHeader("X-Forwarded-For");
-        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
-            return xForwardedFor.split(",")[0].trim();
-        }
-        String xRealIp = request.getHeader("X-Real-IP");
-        if (xRealIp != null && !xRealIp.isBlank()) {
-            return xRealIp.trim();
-        }
         return request.getRemoteAddr();
     }
 }

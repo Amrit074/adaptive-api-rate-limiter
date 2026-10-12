@@ -1,6 +1,5 @@
 package com.amrit.ratelimiter.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,7 +17,6 @@ import java.util.concurrent.TimeUnit;
  */
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class RateLimiterService {
 
     @Qualifier("rateLimitTemplate")
@@ -29,6 +27,16 @@ public class RateLimiterService {
 
     @Qualifier("slidingWindowRateLimitScript")
     private final DefaultRedisScript<String> slidingWindowRateLimitScript;
+
+    public RateLimiterService(
+        @Qualifier("rateLimitTemplate") RedisTemplate<String, String> redisTemplate,
+        @Qualifier("blocklistTemplate") RedisTemplate<String, String> blocklistTemplate,
+        @Qualifier("slidingWindowRateLimitScript") DefaultRedisScript<String> slidingWindowRateLimitScript
+    ) {
+        this.redisTemplate = redisTemplate;
+        this.blocklistTemplate = blocklistTemplate;
+        this.slidingWindowRateLimitScript = slidingWindowRateLimitScript;
+    }
 
     @Value("${rate-limiter.max-requests:5}")
     private int maxRequests;

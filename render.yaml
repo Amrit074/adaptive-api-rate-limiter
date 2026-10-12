@@ -7,6 +7,8 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /actuator/health
     envVars:
+      - key: RATE_LIMITER_ADMIN_KEY
+        generateValue: true
       - key: SPRING_DATASOURCE_URL
         sync: false
       - key: SPRING_DATASOURCE_USERNAME

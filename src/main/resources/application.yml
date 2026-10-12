@@ -33,6 +33,7 @@ spring:
 
 # Rate Limiter Configuration
 rate-limiter:
+  admin-key: ${RATE_LIMITER_ADMIN_KEY:}
   # Max requests per window per IP
   max-requests: ${RATE_LIMITER_MAX_REQUESTS:5}
   # Window size in seconds
